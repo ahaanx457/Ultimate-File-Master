@@ -29,16 +29,23 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "9.7.1"
+          gradle-version: "9.5.0"
 
       - name: Show Project Files
         run: |
           echo "=== ROOT ==="
           ls -la
+
           echo "=== APP ==="
           ls -la app || true
+
           echo "=== GRADLE FILES ==="
-          find . -maxdepth 2 -type f \( -name "build.gradle" -o -name "build.gradle.kts" -o -name "settings.gradle" -o -name "settings.gradle.kts" \) -print
+          find . -maxdepth 2 -type f \
+            \( -name "build.gradle" \
+            -o -name "build.gradle.kts" \
+            -o -name "settings.gradle" \
+            -o -name "settings.gradle.kts" \) \
+            -print
 
       - name: Build Debug APK
         run: gradle :app:assembleDebug --stacktrace

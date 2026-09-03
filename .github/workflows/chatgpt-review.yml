@@ -1,0 +1,206 @@
+name: ChatGPT Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  code-review:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install OpenAI
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade openai
+
+      - name: Get changed files
+        id: changed-files
+        shell: bash
+        run: |
+          set -e
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git diff --name-only \
+              "${{ github.event.pull_request.base.sha }}" \
+              "${{ github.event.pull_request.head.sha }}" \
+              | grep -E '\.(py|js|jsx|ts|tsx|java|kt|kts|cpp|c|h|hpp)$' \
+              | head -20 > changed_files.txt || true
+          else
+            git diff --name-only \
+              "${{ github.event.before }}" \
+              "${{ github.sha }}" \
+              | grep -E '\.(py|js|jsx|ts|tsx|java|kt|kts|cpp|c|h|hpp)$' \
+              | head -20 > changed_files.txt || true
+          fi
+
+          echo "Changed files:"
+          cat changed_files.txt || true
+
+      - name: Review code with OpenAI
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_BEFORE: ${{ github.event.before }}
+          GITHUB_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          from openai import OpenAI
+
+          api_key = os.getenv("OPENAI_API_KEY")
+
+          if not api_key:
+              print("❌ OPENAI_API_KEY GitHub Secret नहीं मिला.")
+              print("GitHub → Settings → Secrets and variables → Actions")
+              exit(1)
+
+          client = OpenAI(api_key=api_key)
+
+          event_name = os.getenv("GITHUB_EVENT_NAME")
+
+          if event_name == "pull_request":
+              base_sha = os.getenv("PR_BASE_SHA")
+              head_sha = os.getenv("PR_HEAD_SHA")
+
+              diff_command = [
+                  "git",
+                  "diff",
+                  "--no-ext-diff",
+                  base_sha,
+                  head_sha,
+                  "--"
+              ]
+          else:
+              before = os.getenv("GITHUB_BEFORE")
+              current = os.getenv("GITHUB_SHA")
+
+              if not before or before == "0000000000000000000000000000000000000000":
+                  diff_command = [
+                      "git",
+                      "diff",
+                      "HEAD~1",
+                      current,
+                      "--"
+                  ]
+              else:
+                  diff_command = [
+                      "git",
+                      "diff",
+                      "--no-ext-diff",
+                      before,
+                      current,
+                      "--"
+                  ]
+
+          result = subprocess.run(
+              diff_command,
+              capture_output=True,
+              text=True
+          )
+
+          if result.returncode != 0:
+              print("❌ Git diff निकालने में समस्या:")
+              print(result.stderr)
+              exit(1)
+
+          diff_content = result.stdout
+
+          if not diff_content.strip():
+              print("ℹ️ कोई code change नहीं मिला.")
+              with open("chatgpt_review.md", "w", encoding="utf-8") as f:
+                  f.write("# ChatGPT Code Review\n\nकोई code change नहीं मिला.")
+              exit(0)
+
+          # बहुत बड़ा diff API को नहीं भेजेंगे
+          diff_content = diff_content[:12000]
+
+          prompt = f"""
+          इस Git diff का professional code review करो।
+
+          Review में खास तौर पर ये चीजें देखो:
+          1. Bugs और संभावित runtime errors
+          2. Security problems
+          3. Performance problems
+          4. गलत या outdated API usage
+          5. Code quality
+          6. Maintainability
+          7. Android/Kotlin best practices, अगर code Android/Kotlin का है
+
+          हर समस्या के लिए:
+          - समस्या क्या है
+          - severity: Critical / High / Medium / Low
+          - क्यों समस्या है
+          - सुधार कैसे किया जा सकता है
+
+          अगर कोई महत्वपूर्ण समस्या नहीं है तो साफ बताओ।
+
+          Git diff:
+
+          ```diff
+          {diff_content}
+          ```
+          """
+
+          response = client.responses.create(
+              model="gpt-5-mini",
+              input=[
+                  {
+                      "role": "system",
+                      "content": (
+                          "तुम एक expert software code reviewer हो। "
+                          "सटीक, practical और security-focused review दो। "
+                          "बिना वजह issues मत बनाओ।"
+                      )
+                  },
+                  {
+                      "role": "user",
+                      "content": prompt
+                  }
+              ]
+          )
+
+          review = response.output_text
+
+          print()
+          print("=" * 70)
+          print("✅ CHATGPT CODE REVIEW")
+          print("=" * 70)
+          print(review)
+          print("=" * 70)
+
+          with open("chatgpt_review.md", "w", encoding="utf-8") as f:
+              f.write("# ChatGPT Code Review\n\n")
+              f.write(review)
+              f.write("\n")
+
+          PY
+
+      - name: Upload review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chatgpt-review
+          path: chatgpt_review.md
